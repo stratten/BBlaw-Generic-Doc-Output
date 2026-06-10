@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "build:railway": "npx playwright install --with-deps chromium && npm run build",
+    "build:railway": "PLAYWRIGHT_BROWSERS_PATH=0 npx playwright install --with-deps chromium && npm run build",
     "start": "node dist/src/index.js",
     "test": "npm run build && node --test dist/tests/**/*.test.js",
     "typecheck": "tsc --noEmit"
