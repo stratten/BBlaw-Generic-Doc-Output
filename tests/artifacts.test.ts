@@ -27,6 +27,26 @@ test('normalizes markdown into document blocks', async () => {
   assert.deepEqual(document.blocks.map((block) => block.type), ['heading', 'list', 'table']);
 });
 
+test('renders markdown styling, notes, and tables into HTML', async () => {
+  const { normalizeDocument, renderDocumentHtml } = await import('../src/services/renderDocument');
+  const document = normalizeDocument({
+    title: 'Matter Submissions',
+    markdown: '# Matter Submissions\n\n**Total:** 43 submissions\n\n> *Note on volume:* multiple records may exist per inbound email.\n\n| # | Submission | Client |\n| --- | --- | --- |\n| 1 | `MatSub-001044` | **BYZFUNDER** |',
+    formats: ['pdf'],
+    style: 'report',
+  });
+  const html = renderDocumentHtml(document);
+
+  assert.equal(document.blocks[1].text, '**Total:** 43 submissions');
+  assert.equal((document.blocks[2] as { quote?: boolean }).quote, true);
+  assert.match(html, /<strong>Total:<\/strong>/);
+  assert.match(html, /<blockquote><em>Note on volume:<\/em>/);
+  assert.match(html, /<div class="table-wrap"><table>/);
+  assert.match(html, /<th>#<\/th>/);
+  assert.match(html, /<code>MatSub-001044<\/code>/);
+  assert.equal((html.match(/<h1>/g) || []).length, 1);
+});
+
 test('creates stored artifact metadata and retrievable DOCX file', async () => {
   const { renderDocument } = await import('../src/services/renderDocument');
   const { createStoredArtifact, getStoredArtifact, getStoredArtifactFile, publicArtifactMetadata } = await import('../src/services/artifactStore');

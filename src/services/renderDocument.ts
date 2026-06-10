@@ -41,6 +41,93 @@ function stripMarkdownInline(value: string): string {
     .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
 }
 
+interface InlineToken {
+  text: string;
+  bold?: boolean;
+  italic?: boolean;
+  code?: boolean;
+}
+
+function nextInlineMarker(value: string, start: number): number {
+  const markers = ['**', '__', '`', '[', '*', '_']
+    .map((marker) => value.indexOf(marker, start))
+    .filter((index) => index >= 0);
+  return markers.length ? Math.min(...markers) : value.length;
+}
+
+function parseInlineMarkdown(value = ''): InlineToken[] {
+  const tokens: InlineToken[] = [];
+  let index = 0;
+
+  const pushText = (text: string, options: Omit<InlineToken, 'text'> = {}) => {
+    if (text) tokens.push({ text, ...options });
+  };
+
+  while (index < value.length) {
+    const rest = value.slice(index);
+    const link = /^\[([^\]]+)\]\(([^)]+)\)/.exec(rest);
+    if (link) {
+      pushText(`${link[1]} (${link[2]})`);
+      index += link[0].length;
+      continue;
+    }
+
+    const strongMarker = rest.startsWith('**') ? '**' : rest.startsWith('__') ? '__' : undefined;
+    if (strongMarker) {
+      const end = value.indexOf(strongMarker, index + 2);
+      if (end > index + 2) {
+        pushText(value.slice(index + 2, end), { bold: true });
+        index = end + 2;
+        continue;
+      }
+    }
+
+    if (rest.startsWith('`')) {
+      const end = value.indexOf('`', index + 1);
+      if (end > index + 1) {
+        pushText(value.slice(index + 1, end), { code: true });
+        index = end + 1;
+        continue;
+      }
+    }
+
+    const italicMarker = rest.startsWith('*') ? '*' : rest.startsWith('_') ? '_' : undefined;
+    if (italicMarker && !rest.startsWith('**') && !rest.startsWith('__')) {
+      const end = value.indexOf(italicMarker, index + 1);
+      if (end > index + 1) {
+        pushText(value.slice(index + 1, end), { italic: true });
+        index = end + 1;
+        continue;
+      }
+    }
+
+    const next = nextInlineMarker(value, index + 1);
+    pushText(value.slice(index, next));
+    index = next;
+  }
+
+  return tokens.length ? tokens : [{ text: '' }];
+}
+
+function inlineTextRuns(value = '', options: { bold?: boolean; italic?: boolean } = {}): TextRun[] {
+  return parseInlineMarkdown(value).map((token) => new TextRun({
+    text: token.text,
+    bold: options.bold || token.bold,
+    italics: options.italic || token.italic,
+    font: token.code ? 'Courier New' : undefined,
+  }));
+}
+
+function inlineHtml(value = ''): string {
+  return parseInlineMarkdown(value).map((token) => {
+    const escaped = escapeHtml(token.text);
+    if (token.code) return `<code>${escaped}</code>`;
+    if (token.bold) return `<strong>${escaped}</strong>`;
+    if (token.italic) return `<em>${escaped}</em>`;
+    return escaped;
+  }).join('');
+}
+
 function isDividerRow(cells: string[]): boolean {
   return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
 }
@@ -51,7 +138,7 @@ function parseTable(lines: string[], startIndex: number): { block: ContentBlock;
   while (index < lines.length && lines[index].includes('|')) {
     const cells = lines[index]
       .split('|')
-      .map((cell) => stripMarkdownInline(cell.trim()))
+      .map((cell) => cell.trim())
       .filter((cell, cellIndex, allCells) => !(cell === '' && (cellIndex === 0 || cellIndex === allCells.length - 1)));
     if (!isDividerRow(cells)) rows.push(cells);
     index += 1;
@@ -79,7 +166,7 @@ export function normalizeDocument(input: CreateArtifactRequest): NormalizedDocum
 
   const flushParagraph = () => {
     if (paragraph.length === 0) return;
-    blocks.push({ type: 'paragraph', text: stripMarkdownInline(paragraph.join(' ')) });
+    blocks.push({ type: 'paragraph', text: paragraph.join(' ') });
     paragraph = [];
   };
 
@@ -97,9 +184,20 @@ export function normalizeDocument(input: CreateArtifactRequest): NormalizedDocum
       blocks.push({
         type: 'heading',
         level: heading[1].length as 1 | 2 | 3,
-        text: stripMarkdownInline(heading[2]),
+        text: heading[2],
       });
       index += 1;
+      continue;
+    }
+
+    if (line.startsWith('>')) {
+      flushParagraph();
+      const quoteLines: string[] = [];
+      while (index < lines.length && lines[index].trim().startsWith('>')) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+        index += 1;
+      }
+      blocks.push({ type: 'paragraph', text: quoteLines.join(' '), quote: true } as ContentBlock);
       continue;
     }
 
@@ -127,9 +225,9 @@ export function normalizeDocument(input: CreateArtifactRequest): NormalizedDocum
       const unorderedMatch = /^[-*]\s+(.+)$/.exec(current);
       const orderedMatch = /^\d+\.\s+(.+)$/.exec(current);
       if (ordered && orderedMatch) {
-        listItems.push(stripMarkdownInline(orderedMatch[1]));
+        listItems.push(orderedMatch[1]);
       } else if (!ordered && unorderedMatch) {
-        listItems.push(stripMarkdownInline(unorderedMatch[1]));
+        listItems.push(unorderedMatch[1]);
       } else {
         break;
       }
@@ -170,21 +268,47 @@ function docxChildren(document: NormalizedDocument): Array<Paragraph | Table> {
     }),
   ];
 
-  for (const block of document.blocks) {
+  const visibleBlocks = document.blocks.filter((block, index) => !(
+    index === 0
+    && block.type === 'heading'
+    && stripMarkdownInline(block.text || '').trim().toLowerCase() === document.title.trim().toLowerCase()
+  ));
+
+  for (const block of visibleBlocks) {
     if (block.type === 'heading') {
-      children.push(new Paragraph({ text: block.text || '', heading: headingLevel(block.level), spacing: { before: 240, after: 120 } }));
+      children.push(new Paragraph({
+        children: inlineTextRuns(block.text || '', { bold: true }),
+        heading: headingLevel(block.level),
+        spacing: { before: 320, after: 140 },
+      }));
     } else if (block.type === 'paragraph') {
-      children.push(new Paragraph({ children: [new TextRun(block.text || '')], spacing: { after: 180 } }));
+      const quote = (block as { quote?: boolean }).quote;
+      children.push(new Paragraph({
+        children: inlineTextRuns(block.text || '', { italic: quote }),
+        indent: quote ? { left: 360 } : undefined,
+        border: quote ? { left: { style: 'single', size: 8, color: 'CBD5E1' } } : undefined,
+        spacing: { after: quote ? 220 : 180 },
+      }));
     } else if (block.type === 'list') {
       for (const item of block.items || []) {
-        children.push(new Paragraph({ text: item, bullet: block.ordered ? undefined : { level: 0 }, numbering: block.ordered ? { reference: 'default-numbering', level: 0 } : undefined, spacing: { after: 90 } }));
+        children.push(new Paragraph({
+          children: inlineTextRuns(item),
+          bullet: block.ordered ? undefined : { level: 0 },
+          numbering: block.ordered ? { reference: 'default-numbering', level: 0 } : undefined,
+          spacing: { after: 100 },
+        }));
       }
     } else if (block.type === 'table') {
       children.push(new Table({
         width: { size: 100, type: WidthType.PERCENTAGE },
-        rows: (block.rows || []).map((row) => new TableRow({
+        rows: (block.rows || []).map((row, rowIndex) => new TableRow({
           children: row.map((cell) => new TableCell({
-            children: [new Paragraph({ children: [new TextRun(cell)] })],
+            shading: rowIndex === 0 ? { fill: 'F3F4F6' } : undefined,
+            margins: { top: 120, bottom: 120, left: 120, right: 120 },
+            children: [new Paragraph({
+              children: inlineTextRuns(cell, { bold: rowIndex === 0 }),
+              spacing: { after: 0 },
+            })],
           })),
         })),
       }));
@@ -233,15 +357,25 @@ function escapeHtml(value: string): string {
 }
 
 export function renderDocumentHtml(document: NormalizedDocument): string {
-  const body = document.blocks.map((block) => {
-    if (block.type === 'heading') return `<h${block.level || 3}>${escapeHtml(block.text || '')}</h${block.level || 3}>`;
-    if (block.type === 'paragraph') return `<p>${escapeHtml(block.text || '')}</p>`;
+  const visibleBlocks = document.blocks.filter((block, index) => !(
+    index === 0
+    && block.type === 'heading'
+    && stripMarkdownInline(block.text || '').trim().toLowerCase() === document.title.trim().toLowerCase()
+  ));
+  const body = visibleBlocks.map((block) => {
+    if (block.type === 'heading') return `<h${block.level || 3}>${inlineHtml(block.text || '')}</h${block.level || 3}>`;
+    if (block.type === 'paragraph') {
+      const quote = (block as { quote?: boolean }).quote;
+      return quote
+        ? `<blockquote>${inlineHtml(block.text || '')}</blockquote>`
+        : `<p>${inlineHtml(block.text || '')}</p>`;
+    }
     if (block.type === 'list') {
       const tag = block.ordered ? 'ol' : 'ul';
-      return `<${tag}>${(block.items || []).map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${tag}>`;
+      return `<${tag}>${(block.items || []).map((item) => `<li>${inlineHtml(item)}</li>`).join('')}</${tag}>`;
     }
     if (block.type === 'table') {
-      return `<table>${(block.rows || []).map((row, rowIndex) => `<tr>${row.map((cell) => rowIndex === 0 ? `<th>${escapeHtml(cell)}</th>` : `<td>${escapeHtml(cell)}</td>`).join('')}</tr>`).join('')}</table>`;
+      return `<div class="table-wrap"><table>${(block.rows || []).map((row, rowIndex) => `<tr>${row.map((cell) => rowIndex === 0 ? `<th>${inlineHtml(cell)}</th>` : `<td>${inlineHtml(cell)}</td>`).join('')}</tr>`).join('')}</table></div>`;
     }
     return '<div class="page-break"></div>';
   }).join('\n');
@@ -252,30 +386,45 @@ export function renderDocumentHtml(document: NormalizedDocument): string {
   <meta charset="utf-8" />
   <title>${escapeHtml(document.title)}</title>
   <style>
-    @page { margin: 0.75in; }
-    body { color: #111827; font-family: Georgia, 'Times New Roman', serif; font-size: 12pt; line-height: 1.45; }
-    h1 { font-size: 22pt; text-align: center; margin: 0 0 24pt; }
-    h2 { font-size: 16pt; margin-top: 18pt; }
-    h3 { font-size: 13pt; margin-top: 14pt; }
-    p { margin: 0 0 10pt; }
-    table { border-collapse: collapse; margin: 12pt 0; width: 100%; }
-    th, td { border: 1px solid #d1d5db; padding: 6pt; text-align: left; vertical-align: top; }
-    th { background: #f3f4f6; font-weight: 700; }
+    @page { margin: 0.65in; }
+    body { background: #ffffff; color: #111827; font-family: Arial, Helvetica, sans-serif; font-size: 10.5pt; line-height: 1.5; }
+    main { max-width: 7.35in; margin: 0 auto; }
+    h1 { color: #111827; font-size: 18pt; line-height: 1.2; margin: 0 0 10pt; text-align: left; }
+    h2 { border-top: 1px solid #e5e7eb; color: #111827; font-size: 14pt; margin: 22pt 0 8pt; padding-top: 14pt; }
+    h3 { color: #1f2937; font-size: 11.5pt; margin: 14pt 0 6pt; }
+    p { margin: 0 0 8pt; }
+    ul, ol { margin: 6pt 0 10pt 18pt; padding: 0; }
+    li { margin: 2pt 0; }
+    blockquote { border-left: 3px solid #d1d5db; color: #111827; font-style: italic; margin: 12pt 0 14pt; padding: 2pt 0 2pt 12pt; }
+    code { background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 3px; font-family: 'Courier New', monospace; font-size: 9.5pt; padding: 0 2pt; }
+    .table-wrap { margin: 12pt 0 18pt; overflow: hidden; }
+    table { border-collapse: collapse; font-size: 8.5pt; table-layout: auto; width: 100%; }
+    th, td { border-bottom: 1px solid #d1d5db; padding: 5pt 6pt; text-align: left; vertical-align: top; }
+    th { background: #f3f4f6; border-top: 1px solid #d1d5db; color: #111827; font-weight: 700; }
+    td { color: #374151; }
     .page-break { page-break-after: always; }
   </style>
 </head>
 <body>
-  <h1>${escapeHtml(document.title)}</h1>
-  ${body}
+  <main>
+    <h1>${escapeHtml(document.title)}</h1>
+    ${body}
+  </main>
 </body>
 </html>`;
 }
 
 function simplePdfBuffer(document: NormalizedDocument): Buffer {
-  const text = [document.title, ...document.blocks.flatMap((block) => {
-    if (block.type === 'heading' || block.type === 'paragraph') return [block.text || ''];
-    if (block.type === 'list') return block.items || [];
-    if (block.type === 'table') return (block.rows || []).map((row) => row.join(' | '));
+  const pdfSafeText = (value: string) => stripMarkdownInline(value)
+    .replace(/[–—]/g, '-')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[✅🔄]/g, '')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '');
+  const text = [pdfSafeText(document.title), ...document.blocks.flatMap((block) => {
+    if (block.type === 'heading' || block.type === 'paragraph') return [pdfSafeText(block.text || '')];
+    if (block.type === 'list') return (block.items || []).map((item) => `- ${pdfSafeText(item)}`);
+    if (block.type === 'table') return (block.rows || []).map((row) => row.map(pdfSafeText).join(' | '));
     return [''];
   })].join('\n');
   const escaped = text.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
