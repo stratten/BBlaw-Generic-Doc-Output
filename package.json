@@ -2,11 +2,11 @@
   "name": "bblaw-doc-artifacts",
   "version": "0.1.0",
   "description": "Generic document artifact generation service for Word and PDF outputs",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "test": "npm run build && node --test dist/tests/**/*.test.js",
     "typecheck": "tsc --noEmit"
   },
